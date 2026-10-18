@@ -12,6 +12,11 @@
 备份数据库(菜单7) → 停止服务(菜单4) → 替换代码 → 一键部署(菜单1，自动迁移) → 验证(菜单2)
 ```
 
+> 配好 GitHub Actions 的四个密文后（见仓库 README「GitHub 自动部署」），
+> 上面这套可以压成一次点击：Actions → deploy-server → Run workflow。
+> 它会下载 Release 里的 `WildAPI.tar.gz`、备份现有代码、续用原 `.env` 再重新部署。
+> 本文下面几节保留，用于手动操作或排障。
+
 ---
 
 ## 二、详细步骤

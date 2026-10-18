@@ -1,0 +1,62 @@
+name: ci
+
+# 每次 push / PR 自动跑：后端语法与模块加载 → 代理链路回归 → 前端构建 → compose 合法性
+on:
+  push:
+    branches: [ "main" ]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装后端依赖
+        working-directory: 后端
+        run: npm ci
+
+      - name: 语法与模块加载检查
+        working-directory: 后端
+        run: npm run check:syntax
+
+      - name: 代理链路回归（自带 mock 上游，不需要数据库）
+        working-directory: 后端
+        run: npm run test:relay
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装前端依赖
+        working-directory: 前端
+        run: npm ci
+
+      - name: 构建前端
+        working-directory: 前端
+        run: npm run build
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只验语法与变量插值，不真起容器：占位密钥够用
+      - name: 校验 docker-compose.yml 可解析
+        working-directory: 后端/docker
+        env:
+          MYSQL_ROOT_PASSWORD: ci-placeholder
+          MYSQL_PASSWORD: ci-placeholder
+          JWT_SECRET: ci-placeholder
+          ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+        run: docker compose config -q

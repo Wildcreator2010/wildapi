@@ -45,8 +45,43 @@ UPDATE users SET role = 'superadmin' WHERE username = '你的用户名';
 ### 跑校验
 
 ```bash
+npm run check:syntax # 全部 .js 语法 + 模块加载检查
 npm run test:relay   # 代理链路回归，自带 mock 上游，不需要 MySQL/Redis
 npm run test:e2e     # 真库端到端，会写临时数据并自动回删，需 WILDAPI_E2E_CONFIRM=1
+```
+
+## GitHub 自动部署
+
+三个工作流，都在 Actions 里跑：
+
+| 触发 | 工作流 | 做什么 |
+|-----|-------|-------|
+| 每次 push / PR | `ci.yml` | 后端语法与模块加载、代理链路回归、前端构建、compose 可解析 |
+| 推 `v*` 标签（或手动） | `release.yml` | 先跑校验，再构建前端 → 打成 `WildAPI.tar.gz` 挂到该 Release（**包里不含 `.env`**，混进凭据会直接失败） |
+| 手动点 | `deploy.yml` | SSH 到服务器跑 `后端/docker/pull-release.sh`：下载指定版本的包 → 校验 → 备份现有代码 → 替换 → 续用原 `.env` → 重新构建部署 |
+
+用法：发布就是打标签
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1     # Actions 自动出包并挂到 Release
+```
+
+服务器更新就到仓库的 **Actions → deploy-server → Run workflow**，`version` 留空取最新一版。
+第一次用要先在 **Settings → Secrets and variables → Actions → Repository secrets** 配好：
+
+```
+DEPLOY_SSH_HOST   服务器地址
+DEPLOY_SSH_USER   SSH 用户
+DEPLOY_SSH_KEY    SSH 私钥（公钥加到服务器 authorized_keys）
+DEPLOY_PATH       项目根目录，默认 /opt/WildAPI
+（可选 DEPLOY_SSH_PORT，默认 22）
+```
+
+密文没配齐时工作流会在第一步就停下并告诉你缺哪个，不会拿半套配置去连服务器。
+不想用 Actions 也可以直接在服务器上手动跑：
+
+```bash
+REPO=Wildcreator2010/wildapi bash 后端/docker/pull-release.sh v1.0.1 /opt/WildAPI
 ```
 
 ## 环境要求

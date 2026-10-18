@@ -1,0 +1,81 @@
+name: deploy-server
+
+# 手动一键部署：SSH 到服务器执行 后端/docker/pull-release.sh
+# （下载指定 Release 的部署包 → 备份现有代码 → 替换 → 保留原 .env → 重新部署）
+#
+# 需要先在 仓库 Settings → Security → Secrets and variables → Actions → Repository secrets
+# 里配好下面四项，未配置时本工作流会在第一步就失败并告诉你缺哪个：
+#   DEPLOY_SSH_HOST  服务器地址（可带端口则另配 DEPLOY_SSH_PORT，默认 22）
+#   DEPLOY_SSH_USER   SSH 用户（宝塔一般是 root；建议单独建一个部署用户）
+#   DEPLOY_SSH_KEY    SSH 私钥（整份私钥文本；公钥需加到服务器 authorized_keys）
+#   DEPLOY_PATH       服务器上项目根目录，默认部署形态是 /opt/WildAPI
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 要部署的 Release 标签（留空 = 最新一版）
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查必需密文
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          missing=""
+          for v in DEPLOY_SSH_HOST DEPLOY_SSH_USER DEPLOY_SSH_KEY DEPLOY_PATH; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "缺少仓库密文:$missing" >&2
+            echo "请到 仓库 Settings → Secrets and variables → Actions 添加后重试" >&2
+            exit 1
+          fi
+
+      # 版本号会被拼进远程命令，先卡死字符集，避免把 Actions 输入当 shell 用
+      - name: 校验版本输入
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ] && ! echo "$INPUT_VERSION" | grep -qE '^v[0-9A-Za-z._-]+$'; then
+            echo "标签格式不合法（应形如 v1.0.1）: $INPUT_VERSION" >&2
+            exit 1
+          fi
+
+      - name: 建立 SSH 通道
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # 取本次运行的 pull-release.sh 再传上去：服务器上的老版本代码可能还没有这个脚本
+      - uses: actions/checkout@v4
+
+      - name: 部署
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          SSH_OPT="-o StrictHostKeyChecking=yes"
+          SCP_OPT="-o StrictHostKeyChecking=yes"
+          if [ -n "${DEPLOY_SSH_PORT:-}" ]; then
+            SSH_OPT="$SSH_OPT -p $DEPLOY_SSH_PORT"
+            SCP_OPT="$SCP_OPT -P $DEPLOY_SSH_PORT"
+          fi
+          scp $SCP_OPT 后端/docker/pull-release.sh \
+            "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST:/tmp/wildapi-pull-release.sh"
+          ssh $SSH_OPT "$DEPLOY_SSH_USER@$DEPLOY_SSH_HOST" \
+            "REPO='$GITHUB_REPOSITORY' bash /tmp/wildapi-pull-release.sh '$INPUT_VERSION' '$DEPLOY_PATH'"

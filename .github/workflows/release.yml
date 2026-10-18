@@ -1,0 +1,63 @@
+name: build-and-release
+
+# 推送 v* 标签（如 v1.0.1）自动：校验 → 构建前端 → 打包部署 tar.gz（不含 .env）→ 挂到 Release
+# 也可以手动触发（workflow_dispatch），用来在没有新标签时重出一个包
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 后端校验（不通过就不出包）
+        working-directory: 后端
+        run: |
+          npm ci
+          npm run check:syntax
+          npm run test:relay
+
+      - name: 构建前端产物
+        working-directory: 前端
+        run: |
+          npm ci
+          npm run build
+
+      - name: 打部署包
+        run: |
+          tar -czf WildAPI.tar.gz \
+            --exclude='*/node_modules' \
+            --exclude='*/node_modules/*' \
+            --exclude='后端/.env' \
+            --exclude='后端/docker/.env' \
+            --exclude='后端/logs' \
+            --exclude='后端/logs/*' \
+            --exclude='后端/backups/*.sql' \
+            --exclude='后端/backups/*.gz' \
+            --exclude='*.canvas.tsx' \
+            --exclude='*.canvas.status.json' \
+            后端 前端
+
+      - name: 包内不得含凭据或依赖
+        run: |
+          if tar -tzf WildAPI.tar.gz | grep -E '(^|/)\.env$|node_modules/'; then
+            echo "部署包里混入了 .env 或 node_modules，中止发布" >&2
+            exit 1
+          fi
+          echo "包内文件数: $(tar -tzf WildAPI.tar.gz | wc -l)"
+
+      - name: 上传到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: WildAPI.tar.gz
+          generate_release_notes: true
+          overwrite_files: true
