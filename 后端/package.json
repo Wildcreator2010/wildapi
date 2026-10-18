@@ -1,6 +1,6 @@
 {
   "name": "wildapi-backend",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI API Proxy Station - Backend Service",
   "main": "src/app.js",
   "scripts": {

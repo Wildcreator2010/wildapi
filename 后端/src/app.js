@@ -27,6 +27,10 @@ const availabilityService = require('./services/availabilityService');
 
 const app = express();
 
+// 版本号只在 package.json 里维护：健康接口与启动横幅都从这里取，
+// 免得发版时改了两处漏一处（历史上是写死在代码里的 1.0.0）
+const pkg = require('../package.json');
+
 // ==================== 基础中间件 ====================
 
 // 反代之后必须信任 X-Forwarded-For，否则 req.ip 恒为代理地址:
@@ -100,7 +104,7 @@ app.get('/api/health', async (req, res) => {
     status,
     ...(isProd ? {} : {
       service: 'wildapi',
-      version: '1.0.0',
+      version: pkg.version,
       mysql: mysqlOk ? 'connected' : 'unavailable',
       redis: redisOk ? 'connected' : 'unavailable',
     }),
@@ -161,7 +165,7 @@ process.on('uncaughtException', (err) => {
 
 async function start() {
   console.log('\n========================================');
-  console.log('  WildAPI - AI API Proxy Station v1.0.0');
+  console.log('  WildAPI - AI API Proxy Station v' + pkg.version);
   console.log('========================================\n');
 
   // 配置校验
