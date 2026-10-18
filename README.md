@@ -16,9 +16,12 @@ AI API 中转站。一个入口对接多家上游，按模型计价扣费，带�
 - **管理后台**：服务商与密钥池、模型路由、定价、用户与余额、请求日志、用量统计、厂商分类、备份恢复。
 - **审计**：`request_logs` 记下实际服务这次请求的上游密钥与模型，可按密钥维度看用量。
 
-## 快速开始
+## 部署
 
-### Docker 一键部署
+需要 Node 20+、MySQL 8、Redis 7（用 compose 就不用自己装，三个都在容器里）。
+数据库账号要有在 `wildapi` 库建表的权限 —— 迁移脚本里库名硬编码 `wildapi`，改 `DB_NAME` 会在启动日志里明确报出来。
+
+### 方式一：Docker Compose（推荐）
 
 ```bash
 cd 后端/docker
@@ -26,23 +29,85 @@ cp .env.example .env        # 密码与密钥必须全换掉，占位符不改�
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-或者跑 `./wildapi.sh` 打开菜单面板（部署 / 状态 / 日志 / 备份 / 卸载）。
-数据全落在 `.env` 里的 `DATA_DIR`（默认 `/opt/WildAPI`），MySQL 与 Redis 只绑 `127.0.0.1`，对外只开前端端口。
+脚本自己做：建数据目录 → 构建镜像 → 起容器 → 等 MySQL 健康 → 依次执行 `后端/migrations/*.sql` → `docker compose ps`。
+日常管理用菜单面板 `./wildapi.sh`（`1` 部署 · `2` 状态 · `3` 启动 · `4` 停止 · `5` 重启 · `6` 日志 · `7` 备份 · `8` 卸载）。
 
-### 本地开发
+数据全落在 `.env` 里的 `DATA_DIR`（默认 `/opt/WildAPI`）。MySQL 与 Redis 只绑 `127.0.0.1`，对外只有前端端口。
+
+### 方式二：源码直跑（本机开发 / 已有外部数据库）
 
 ```bash
-cd 后端 && npm i && npm run migrate && npm run dev
-cd 前端 && npm i && npm run dev
+cd 后端 && npm i && cp .env.example .env   # 填 DB_* 与 REDIS_*
+npm run migrate                            # 或首次用 npm run setup-mysql
+npm run dev                                # 后端 http://localhost:3000
+
+cd 前端 && npm i && npm run dev            # 面板 http://localhost:5173
 ```
 
-首个管理员：SSO 登录后你在库里的角色是 `user`，需要手动改一次
+Vite 已把 `/api` 与 `/v1` 代理到 `http://localhost:3000`，开发时不用自己配反代。
+构建产物用 `npm run build`，产物在 `前端/dist/`，交给任意静态服务器 + 一条 `/api`、`/v1` 反代即可（`后端/docker/nginx.conf` 是现成模板，SSE 已关缓冲）。
+
+## 要改的配置
+
+`后端/docker/.env`（compose 用）与 `后端/.env`（源码直跑用）都以 `.env.example` 为准。
+
+| 项 | 说明 |
+|---|---|
+| `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `REDIS_PASSWORD` | 占位符不替换，`deploy.sh` 与容器起不来 |
+| `JWT_SECRET` | 登录会话密钥，换了等于所有人重新登录 |
+| `ENCRYPTION_KEY` | 64 位十六进制。**上游密钥入库后就再也换不了**，换了库里已加密的密文解不开 |
+| `MYSQL_DATABASE` / `DB_NAME` | 迁移脚本里库名硬编码 `wildapi`，改成别的名字启动日志会报「当前库中没有 users 表」 |
+| `FRONTEND_URL` | 后端 CORS 白名单，正式域名要改成 `https://你的域名`，否则面板调接口被浏览器拦 |
+| `SSO_AUTH_URL` + WildAccount 侧 | 面板回调是 `{站点}/sso-callback`；要在认证中心把该域名加进 `wildapi` 应用的回调前缀，否则换不到 token |
+| `FRONTEND_PORT` / `BACKEND_PORT` | 示例默认 `80` / `3000`；被占用就改（宝塔常占 80） |
+| `TRUST_PROXY` | 默认信任一跳代理（`X-Forwarded-For`）。直连暴露后端时设 `false`，否则 IP 限流可被伪造头绕过 |
+| `GLOBAL_RATE_LIMIT` | 每 IP 每分钟请求数，默认 600 |
+
+要 HTTPS：用宝塔/Nginx 反代到 `127.0.0.1:FRONTEND_PORT`，传 `X-Forwarded-For` 与 `X-Forwarded-Proto`，再把 `FRONTEND_URL` 换成 `https://` 域名。
+
+## 部署后自检
+
+```bash
+cd 后端/docker && docker compose ps                         # 四个容器都是 healthy
+curl -s http://127.0.0.1:80/api/health                      # {"status":"ok"}；80 换成你的 FRONTEND_PORT
+```
+
+```bash
+# 库里应有 14 张表（含 provider_types、audit_logs）
+docker exec -it wildapi-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SHOW TABLES" wildapi'
+```
+
+然后到面板里加服务商 → 加一把上游密钥 → 用户页拿一个 `ak-` 代理密钥 → 真调一次：
+
+```bash
+curl -s http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer ak-你的密钥" -H "Content-Type: application/json" \
+  -d '{"model":"你上架的模型名","messages":[{"role":"user","content":"你好"}]}'
+```
+
+（`3000` 换成你的 `BACKEND_PORT`；只想外部访问的话走前端端口的 `/v1/...` 也一样。）
+
+首个管理员：SSO 登录后你在库里的角色是 `user`，管理入口只认本地角色，需要手动改一次
 
 ```sql
 UPDATE users SET role = 'superadmin' WHERE username = '你的用户名';
 ```
 
-### 跑校验
+更细的逐项验收清单（本机已打勾的部分附了证据）见 `后端/DOCKER_DEPLOYMENT_CHECK.md` 第十三节。
+
+## 升级与回滚
+
+手动：`./wildapi.sh` → `4` 停止 → 替换 `后端/`、`前端/` 代码目录（数据目录不动）→ `1` 部署，迁移会自动重跑。细节见 `后端/UPGRADE_GUIDE.md`。
+一键：仓库 Actions → `deploy-server` → Run workflow（见下节），它会下载 Release 里的包、把现有代码备份成 `后端.pre-<时间戳>` 再替换，原 `.env` 自动续用。
+回滚：把备份目录 `mv` 回来，再跑一次 `./deploy.sh`。
+
+备份：面板 `7`（或直接调 `POST /api/admin/backup`），产物落在 `$DATA_DIR/backups/`，面板里也能下载与回传恢复。命令行等价：
+
+```bash
+docker exec wildapi-mysql sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines wildapi' > backup.sql
+```
+
+## 跑校验
 
 ```bash
 npm run check:syntax # 全部 .js 语法 + 模块加载检查
@@ -83,10 +148,6 @@ DEPLOY_PATH       项目根目录，默认 /opt/WildAPI
 ```bash
 REPO=Wildcreator2010/wildapi bash 后端/docker/pull-release.sh v1.0.1 /opt/WildAPI
 ```
-
-## 环境要求
-
-Node 20+、MySQL 8、Redis 7。数据库账号需要对 `wildapi` 库的建表权限 —— 迁移脚本里的库名是硬编码的 `wildapi`，改了 `DB_NAME` 启动日志会明确报出来。
 
 ## 目录
 
