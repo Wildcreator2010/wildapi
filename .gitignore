@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 凭据与本机配置：只提交 .env.example
+.env
+.env.*
+!.env.example
+
+# 运行期数据（数据库文件、日志、备份、Redis 持久化）
+logs/
+*.log
+mysql/
+redis/
+backups/*
+!backups/.gitkeep
+
+# 打包产物与本机工具痕迹
+*.tar.gz
+.qoder/
+.workbuddy/
+*.canvas.tsx
+*.canvas.status.json
+.DS_Store
+Thumbs.db

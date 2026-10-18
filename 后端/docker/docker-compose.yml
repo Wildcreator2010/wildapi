@@ -1,0 +1,157 @@
+# ============================================
+# WildAPI - AI API 中转站 (单实例部署)
+# 所有持久化数据映射到宿主机 ${DATA_DIR} (默认 /opt/WildAPI/)
+# ============================================
+# 快速部署 (宝塔服务器):
+#   1. 解压项目到 /opt/WildAPI
+#   2. cd /opt/WildAPI/后端/docker
+#   3. 编辑 .env 修改密码和密钥 (首次部署)
+#   4. chmod +x wildapi.sh && ./wildapi.sh
+#      → 在菜单中选择 [1] 一键部署，全程无需手动输 Docker 命令
+# ============================================
+# 日常管理: ./wildapi.sh 打开菜单面板 (状态/启停/日志/备份)
+# 宝塔用户: 也可在宝塔 Docker 管理器中图形化管理 wildapi-* 容器
+# ============================================
+
+services:
+  # ==================== MySQL 8.0 ====================
+  mysql:
+    image: mysql:8.0
+    container_name: ${PREFIX:-wildapi}-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wildapi}
+      MYSQL_USER: ${MYSQL_USER:-wildapi}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请设置 MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ${DATA_DIR:-/opt/WildAPI}/mysql:/var/lib/mysql
+      # 直接用仓库内的迁移目录: ${DATA_DIR}/migrations 在首次 `docker compose up` 时并不存在，
+      # dockerd 会自动创建成空目录 → initdb 一条脚本都不执行 → 库表全缺，但容器照样 Up
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=200
+      - --wait_timeout=28800
+      - --bind-address=0.0.0.0
+    healthcheck:
+      # mysqladmin ping 在"Access denied"时也返回 0，会在初始化阶段的临时服务器上提前转绿;
+      # 改为用应用账号走 TCP 认证，既避开 init 阶段 (仅监听 socket)，也确认真实可用
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks:
+      - wildapi-network
+
+  # ==================== Redis 7 ====================
+  redis:
+    image: redis:7-alpine
+    container_name: ${PREFIX:-wildapi}-redis
+    restart: unless-stopped
+    environment:
+      # 供健康检查在容器内读取; 未设置时按无密码模式探测
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ${DATA_DIR:-/opt/WildAPI}/redis:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --save 900 1
+      --save 300 10
+      ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    healthcheck:
+      # 开了 requirepass 却不带密码 ping → NOAUTH 恒失败 → redis 永不 healthy →
+      # backend 的 depends_on: service_healthy 卡死，整套服务起不来
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping; else redis-cli ping; fi | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wildapi-network
+
+  # ==================== 后端服务 (Express) ====================
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    image: ${PREFIX:-wildapi}-backend:latest
+    container_name: ${PREFIX:-wildapi}-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-wildapi}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-wildapi}
+      DB_POOL_SIZE: 10
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:?请设置 JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?请设置 ENCRYPTION_KEY}
+      SSO_CLIENT_ID: ${SSO_CLIENT_ID:-wildapi}
+      SSO_CLIENT_SECRET: ${SSO_CLIENT_SECRET:-}
+      # 默认直连同机认证中心 (绕过 Cloudflare Bot 拦截，认证中心在宿主机 4000 端口)
+      SSO_AUTH_URL: ${SSO_AUTH_URL:-http://host.docker.internal:4000}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      GLOBAL_RATE_LIMIT: ${GLOBAL_RATE_LIMIT:-600}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-3000}:3000"
+    extra_hosts:
+      # 允许容器内直连宿主机 (访问同机认证中心 4000 端口)
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${DATA_DIR:-/opt/WildAPI}/backups:/app/backups
+      - ${DATA_DIR:-/opt/WildAPI}/logs:/app/logs
+    networks:
+      - wildapi-network
+
+  # ==================== 前端 (Nginx) ====================
+  frontend:
+    build:
+      context: ../../前端
+      dockerfile: ../后端/docker/Dockerfile.frontend
+      # 前端配置是构建期常量: 不传 build.args 的话 .env 里的 VITE_* 全部无效 (镜像只会用 Dockerfile 的默认值)
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_SSO_AUTH_URL: ${VITE_SSO_AUTH_URL:-https://login.wildcreator.top}
+        VITE_SSO_CLIENT_ID: ${VITE_SSO_CLIENT_ID:-wildapi}
+    image: ${PREFIX:-wildapi}-frontend:latest
+    container_name: ${PREFIX:-wildapi}-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - wildapi-network
+
+networks:
+  wildapi-network:
+    name: ${PREFIX:-wildapi}-network
+    driver: bridge

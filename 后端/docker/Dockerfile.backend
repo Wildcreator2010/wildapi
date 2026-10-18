@@ -1,0 +1,43 @@
+# ============================================
+# WildAPI - 后端 Docker 镜像 (多阶段构建)
+# 基于 Node.js 20 Alpine，内置 mysql-client 用于备份恢复
+# ============================================
+
+# ---- 阶段 1: 安装依赖 ----
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# ---- 阶段 2: 生产运行 ----
+FROM node:20-alpine
+WORKDIR /app
+
+# 安装运行时依赖 (mysqldump / mysql 用于备份恢复)
+RUN apk add --no-cache mysql-client tzdata curl && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone
+
+# 复制构建产物
+COPY --from=deps /app/node_modules ./node_modules
+COPY src ./src
+COPY migrations ./migrations
+COPY scripts ./scripts
+COPY package*.json ./
+
+# 运行期目录: 备份目录 + 日志目录 (NODE_ENV=production 时 winston 在 require 阶段
+# 就以相对路径打开 logs/*.log，目录缺失会让容器启动即崩，且被 bind mount 的 root 属主挡住)
+RUN mkdir -p /app/backups /app/logs
+
+# 安全: 使用非 root 用户运行
+RUN addgroup -g 1001 wildapi && \
+    adduser -u 1001 -G wildapi -s /bin/sh -D wildapi && \
+    chown -R wildapi:wildapi /app
+USER wildapi
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/api/health || exit 1
+
+CMD ["node", "src/app.js"]
